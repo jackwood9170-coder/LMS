@@ -133,7 +133,7 @@ def load_upcoming_fixtures(sb: Client) -> list[dict]:
     now = datetime.now(timezone.utc).isoformat()
     result = (
         sb.table("fixtures")
-        .select("id, home_team_id, away_team_id, kickoff, gameweek")
+        .select("id, home_team_id, away_team_id, kickoff, gameweek, has_odds")
         .eq("status", "scheduled")
         .gt("kickoff", now)
         .order("kickoff")
@@ -213,20 +213,7 @@ def build_comparison_data() -> dict:
         away = teams.get(atid)
         if not home or not away:
             continue
-        if fid not in odds_map:
-            continue
 
-        entry = odds_map[fid]
-        outcomes = entry["outcomes"]
-        source = entry["source"]
-
-        odds_h = find_outcome_price(outcomes, htid, alias_to_id)
-        odds_d = outcomes.get("Draw")
-        odds_a = find_outcome_price(outcomes, atid, alias_to_id)
-        if not all([odds_h, odds_d, odds_a]):
-            continue
-
-        mkt_h, mkt_d, mkt_a = devig(odds_h, odds_d, odds_a)
         elo_h, elo_d, elo_a = elo_1x2(
             float(home["current_elo"]),
             float(away["current_elo"]),
@@ -234,30 +221,48 @@ def build_comparison_data() -> dict:
             draw_boundary,
         )
 
-        rows.append({
+        row = {
             "home_team": home["name"],
             "away_team": away["name"],
             "home_elo": round(float(home["current_elo"]), 1),
             "away_elo": round(float(away["current_elo"]), 1),
             "kickoff": fixture["kickoff"],
             "gameweek": fixture.get("gameweek"),
-            "source": source,
-            "market": {
-                "home": round(mkt_h * 100, 1),
-                "draw": round(mkt_d * 100, 1),
-                "away": round(mkt_a * 100, 1),
-            },
+            "has_odds": fixture.get("has_odds", False),
             "model": {
                 "home": round(elo_h * 100, 1),
                 "draw": round(elo_d * 100, 1),
                 "away": round(elo_a * 100, 1),
             },
-            "diff": {
-                "home": round((elo_h - mkt_h) * 100, 1),
-                "draw": round((elo_d - mkt_d) * 100, 1),
-                "away": round((elo_a - mkt_a) * 100, 1),
-            },
-        })
+            "market": None,
+            "diff": None,
+            "source": None,
+        }
+
+        if fid in odds_map:
+            entry = odds_map[fid]
+            outcomes = entry["outcomes"]
+            source = entry["source"]
+
+            odds_h = find_outcome_price(outcomes, htid, alias_to_id)
+            odds_d = outcomes.get("Draw")
+            odds_a = find_outcome_price(outcomes, atid, alias_to_id)
+
+            if all([odds_h, odds_d, odds_a]):
+                mkt_h, mkt_d, mkt_a = devig(odds_h, odds_d, odds_a)
+                row["source"] = source
+                row["market"] = {
+                    "home": round(mkt_h * 100, 1),
+                    "draw": round(mkt_d * 100, 1),
+                    "away": round(mkt_a * 100, 1),
+                }
+                row["diff"] = {
+                    "home": round((elo_h - mkt_h) * 100, 1),
+                    "draw": round((elo_d - mkt_d) * 100, 1),
+                    "away": round((elo_a - mkt_a) * 100, 1),
+                }
+
+        rows.append(row)
 
     return {
         "fixtures": rows,

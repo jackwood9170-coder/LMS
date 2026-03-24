@@ -222,11 +222,13 @@
 
     const fixtures = data.fixtures || [];
     if (!fixtures.length) {
-      app.innerHTML = '<div class="empty">No upcoming fixtures with Pinnacle or Bet365 odds.</div>';
+      app.innerHTML = '<div class="empty">No upcoming fixtures found.</div>';
       return;
     }
 
-    meta.textContent = `${fixtures.length} fixture${fixtures.length > 1 ? 's' : ''} · HFA ${data.model.hfa} · Draw boundary ${data.model.draw_boundary}`;
+    const withOdds = fixtures.filter(f => f.market);
+    const total = fixtures.length;
+    meta.textContent = `${total} fixture${total > 1 ? 's' : ''} · ${withOdds.length} with market odds · HFA ${data.model.hfa} · Draw boundary ${data.model.draw_boundary}`;
 
     // Group by date
     const grouped = {};
@@ -241,19 +243,23 @@
       html += `<div class="date-group-label">${dateLabel}</div>`;
       for (const f of fxs) {
         const time = new Date(f.kickoff).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-        const srcKey = f.source.includes('pinnacle') ? 'pinn' : 'b365';
-        const srcLabel = f.source.includes('pinnacle') ? 'Pinnacle' : 'Bet365';
+        const hasMarket = !!f.market;
+        const srcKey = hasMarket && f.source && f.source.includes('pinnacle') ? 'pinn' : 'b365';
+        const srcLabel = hasMarket ? (f.source.includes('pinnacle') ? 'Pinnacle' : 'Bet365') : null;
+        const gwLabel = f.gameweek ? `GW${f.gameweek}` : '';
 
         const diffClass = (v) => v > 1.5 ? 'diff-pos' : v < -1.5 ? 'diff-neg' : 'diff-neutral';
         const diffFmt = (v) => (v > 0 ? '+' : '') + v.toFixed(1) + '%';
         const pctFmt = (v) => v.toFixed(1) + '%';
+        const dash = '<span style="color:var(--muted)">—</span>';
 
         html += `
         <div class="fixture-card">
           <div class="fixture-header">
             <div class="fixture-teams">${f.home_team} v ${f.away_team}</div>
             <div class="fixture-meta">
-              <span class="badge badge-${srcKey}">${srcLabel}</span>
+              ${gwLabel ? `<span class="fixture-time">${gwLabel}</span>` : ''}
+              ${srcLabel ? `<span class="badge badge-${srcKey}">${srcLabel}</span>` : `<span class="badge" style="background:rgba(255,255,255,0.05);color:var(--muted)">Model only</span>`}
               <span class="fixture-time">${time}</span>
             </div>
           </div>
@@ -265,9 +271,9 @@
             <div class="outcome-header">Away</div>
 
             <div class="label-col">Market</div>
-            <div class="outcome-col row-market">${pctFmt(f.market.home)}</div>
-            <div class="outcome-col row-market">${pctFmt(f.market.draw)}</div>
-            <div class="outcome-col row-market">${pctFmt(f.market.away)}</div>
+            <div class="outcome-col row-market">${hasMarket ? pctFmt(f.market.home) : dash}</div>
+            <div class="outcome-col row-market">${hasMarket ? pctFmt(f.market.draw) : dash}</div>
+            <div class="outcome-col row-market">${hasMarket ? pctFmt(f.market.away) : dash}</div>
 
             <div class="label-col" style="color:var(--accent)">Model</div>
             <div class="outcome-col row-model">${pctFmt(f.model.home)}</div>
@@ -275,9 +281,9 @@
             <div class="outcome-col row-model">${pctFmt(f.model.away)}</div>
 
             <div class="label-col">Edge</div>
-            <div class="outcome-col row-diff ${diffClass(f.diff.home)}">${diffFmt(f.diff.home)}</div>
-            <div class="outcome-col row-diff ${diffClass(f.diff.draw)}">${diffFmt(f.diff.draw)}</div>
-            <div class="outcome-col row-diff ${diffClass(f.diff.away)}">${diffFmt(f.diff.away)}</div>
+            <div class="outcome-col row-diff ${hasMarket ? diffClass(f.diff.home) : ''}">${hasMarket ? diffFmt(f.diff.home) : dash}</div>
+            <div class="outcome-col row-diff ${hasMarket ? diffClass(f.diff.draw) : ''}">${hasMarket ? diffFmt(f.diff.draw) : dash}</div>
+            <div class="outcome-col row-diff ${hasMarket ? diffClass(f.diff.away) : ''}">${hasMarket ? diffFmt(f.diff.away) : dash}</div>
           </div>
 
           <div class="elo-badges">

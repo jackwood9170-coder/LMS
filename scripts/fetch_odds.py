@@ -93,6 +93,7 @@ def upsert_fixture(sb: Client, event: dict, home_id: str, away_id: str) -> str:
         "away_team_id": away_id,
         "kickoff": event["commence_time"],
         "status": "scheduled",
+        "has_odds": True,
         # gameweek intentionally NULL — not provided by the Odds API
     }
     result = (

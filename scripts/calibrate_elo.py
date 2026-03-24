@@ -27,6 +27,7 @@ Required environment variables (see .env):
 
 import os
 import logging
+from datetime import datetime, timezone
 import numpy as np
 from scipy.optimize import minimize
 from dotenv import load_dotenv
@@ -198,14 +199,22 @@ def devIG(odds_h: float, odds_d: float, odds_a: float) -> tuple[float, float, fl
 # ELO model
 # ---------------------------------------------------------------------------
 
-def elo_win_prob(rating_home: float, rating_away: float, hfa: float) -> float:
-    """Expected probability of home win given ratings and home-field advantage."""
-    return 1.0 / (1.0 + 10.0 ** ((rating_away - rating_home - hfa) / ELO_SCALE))
+def elo_1x2(
+    rating_home: float, rating_away: float, hfa: float, draw_boundary: float,
+) -> tuple[float, float, float]:
+    """1X2 probabilities from Elo ratings using a draw-boundary model.
 
+    P(home) = 1 / (1 + 10^(-(dr - D) / S))
+    P(away) = 1 / (1 + 10^( (dr + D) / S))
+    P(draw) = 1 - P(home) - P(away)
 
-def elo_away_prob(rating_home: float, rating_away: float, hfa: float) -> float:
-    """Expected probability of away win."""
-    return 1.0 / (1.0 + 10.0 ** ((rating_home + hfa - rating_away) / ELO_SCALE))
+    where dr = rating_home + hfa - rating_away, D = draw_boundary, S = ELO_SCALE.
+    """
+    dr = rating_home + hfa - rating_away
+    p_home = 1.0 / (1.0 + 10.0 ** (-(dr - draw_boundary) / ELO_SCALE))
+    p_away = 1.0 / (1.0 + 10.0 ** ((dr + draw_boundary) / ELO_SCALE))
+    p_draw = 1.0 - p_home - p_away
+    return p_home, p_draw, p_away
 
 
 # ---------------------------------------------------------------------------
@@ -215,24 +224,29 @@ def elo_away_prob(rating_home: float, rating_away: float, hfa: float) -> float:
 def build_objective(fixtures_data: list[dict]):
     """
     Returns a closure over the fixture data.
-    fixtures_data: list of {home_idx, away_idx, p_home, p_away}
-    The parameter vector x = [r_0, r_1, ..., r_{n-1}, hfa]
+    fixtures_data: list of {home_idx, away_idx, p_home, p_draw, p_away}
+    The parameter vector x = [r_0, r_1, ..., r_{n-1}, hfa, draw_boundary]
     """
     eps = 1e-9  # clip to avoid log(0)
 
     def objective(x: np.ndarray) -> float:
-        ratings = x[:-1]
-        hfa = x[-1]
+        ratings = x[:-2]
+        hfa = x[-2]
+        draw_boundary = x[-1]
         loss = 0.0
         for fd in fixtures_data:
             r_h = ratings[fd["home_idx"]]
             r_a = ratings[fd["away_idx"]]
-            e_h = elo_win_prob(r_h, r_a, hfa)
-            e_a = elo_away_prob(r_h, r_a, hfa)
+            e_h, e_d, e_a = elo_1x2(r_h, r_a, hfa, draw_boundary)
             e_h = np.clip(e_h, eps, 1 - eps)
+            e_d = np.clip(e_d, eps, 1 - eps)
             e_a = np.clip(e_a, eps, 1 - eps)
-            # Log-loss against market-implied probabilities
-            loss += -(fd["p_home"] * np.log(e_h) + fd["p_away"] * np.log(e_a))
+            # Log-loss against market-implied 1X2 probabilities
+            loss += -(
+                fd["p_home"] * np.log(e_h)
+                + fd["p_draw"] * np.log(e_d)
+                + fd["p_away"] * np.log(e_a)
+            )
         return loss
 
     return objective
@@ -302,12 +316,13 @@ def main() -> None:
             skipped += 1
             continue
 
-        p_home, _, p_away = devIG(odds_h, odds_d, odds_a)
+        p_home, p_draw, p_away = devIG(odds_h, odds_d, odds_a)
 
         training.append({
             "home_idx": team_index[htid],
             "away_idx": team_index[atid],
             "p_home":   p_home,
+            "p_draw":   p_draw,
             "p_away":   p_away,
         })
 
@@ -328,21 +343,25 @@ def main() -> None:
     # ---------------------------------------------------------------------------
     # Optimisation
     # ---------------------------------------------------------------------------
-    # Initial values: all teams at 1500, HFA = 65
-    x0 = np.array([1500.0] * n_teams + [65.0])
+    # Initial values: all teams at 1500, HFA=65 Elo pts, draw boundary=85 Elo pts
+    x0 = np.array([1500.0] * n_teams + [65.0, 85.0])
 
     # Constraint: mean rating = 1500
     constraints = {
         "type": "eq",
-        "fun": lambda x: np.mean(x[:-1]) - 1500.0,
+        "fun": lambda x: np.mean(x[:-2]) - 1500.0,
     }
 
-    log.info("Running optimisation (%d teams + HFA) …", n_teams)
+    # Bounds: ratings unbounded, HFA >= 0, draw_boundary >= 1
+    bounds = [(None, None)] * n_teams + [(0, None), (1, None)]
+
+    log.info("Running optimisation (%d teams + HFA + draw boundary) …", n_teams)
     result = minimize(
         build_objective(training),
         x0,
         method="SLSQP",
         constraints=constraints,
+        bounds=bounds,
         options={"maxiter": 2000, "ftol": 1e-10},
     )
 
@@ -351,9 +370,11 @@ def main() -> None:
     else:
         log.info("Optimisation converged. Final loss: %.4f", result.fun)
 
-    calibrated_ratings = result.x[:-1]
-    hfa = result.x[-1]
+    calibrated_ratings = result.x[:-2]
+    hfa = result.x[-2]
+    draw_boundary = result.x[-1]
     log.info("Calibrated HFA: %.1f ELO points", hfa)
+    log.info("Calibrated draw boundary: %.1f ELO points", draw_boundary)
 
     # ---------------------------------------------------------------------------
     # Results summary
@@ -377,6 +398,16 @@ def main() -> None:
         ).eq("id", tid).execute()
 
     log.info("Done. %d team ELO ratings updated.", n_teams)
+
+    # Store model parameters
+    log.info("Writing model parameters (HFA, draw_boundary) …")
+    now = datetime.now(timezone.utc).isoformat()
+    for key, value in [("hfa", hfa), ("draw_boundary", draw_boundary)]:
+        sb.table("model_params").upsert(
+            {"key": key, "value": round(float(value), 4), "updated_at": now},
+            on_conflict="key",
+        ).execute()
+    log.info("Model parameters stored.")
 
 
 if __name__ == "__main__":

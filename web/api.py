@@ -19,6 +19,7 @@ Required environment variables (see .env):
 
 import os
 import sys
+import subprocess
 from datetime import datetime, timezone
 from flask import Flask, jsonify, request
 from dotenv import load_dotenv
@@ -296,6 +297,39 @@ def lms_page():
 def api_fixtures():
     data = build_comparison_data()
     return jsonify(data)
+
+
+@app.route("/api/fetch-upcoming-odds", methods=["POST"])
+def api_fetch_upcoming_odds():
+    """Run scripts/fetch_odds.py and return execution status/output."""
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    script_path = os.path.join(repo_root, "scripts", "fetch_odds.py")
+
+    if not os.path.exists(script_path):
+        return jsonify({
+            "ok": False,
+            "message": "fetch_odds.py not found",
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+        }), 404
+
+    completed = subprocess.run(
+        [sys.executable, script_path],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    ok = completed.returncode == 0
+    return jsonify({
+        "ok": ok,
+        "message": "Upcoming odds fetched" if ok else "Failed to fetch upcoming odds",
+        "exit_code": completed.returncode,
+        "stdout": completed.stdout.strip(),
+        "stderr": completed.stderr.strip(),
+    }), (200 if ok else 500)
 
 
 # ---------------------------------------------------------------------------

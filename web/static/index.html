@@ -197,6 +197,8 @@
 <div class="header">
   <h1><span>LMS</span> &mdash; Elo vs Market</h1>
   <div style="display:flex;gap:16px;align-items:center">
+    <button id="fetchOddsBtn" style="font-size:12px;background:#3b82f6;color:#fff;border:none;border-radius:6px;padding:8px 10px;cursor:pointer">Fetch Upcoming Odds</button>
+    <div id="fetchStatus" class="meta" style="max-width:260px"></div>
     <a href="/lms" style="font-size:12px;color:#3b82f6;text-decoration:none">Last Man Standing →</a>
     <div class="meta" id="headerMeta"></div>
   </div>
@@ -213,8 +215,10 @@
 (async function () {
   const app = document.getElementById('app');
   const meta = document.getElementById('headerMeta');
+  const fetchOddsBtn = document.getElementById('fetchOddsBtn');
+  const fetchStatus = document.getElementById('fetchStatus');
 
-  try {
+  async function loadFixtures() {
     const res = await fetch('/api/fixtures');
     const data = await res.json();
 
@@ -298,10 +302,40 @@
     }
 
     app.innerHTML = html;
+  }
+
+  try {
+    await loadFixtures();
 
   } catch (err) {
     app.innerHTML = `<div class="empty">Failed to load data: ${err.message}</div>`;
   }
+
+  fetchOddsBtn.addEventListener('click', async () => {
+    fetchOddsBtn.disabled = true;
+    fetchOddsBtn.style.opacity = '0.7';
+    fetchStatus.textContent = 'Fetching latest market odds...';
+
+    try {
+      const res = await fetch('/api/fetch-upcoming-odds', { method: 'POST' });
+      const data = await res.json();
+
+      if (!data.ok) {
+        const reason = data.stderr || data.message || `Exit code ${data.exit_code}`;
+        fetchStatus.textContent = `Odds fetch failed: ${reason}`;
+        return;
+      }
+
+      fetchStatus.textContent = 'Odds updated. Refreshing fixture view...';
+      await loadFixtures();
+      fetchStatus.textContent = 'Odds updated and fixture view refreshed.';
+    } catch (err) {
+      fetchStatus.textContent = `Request failed: ${err.message}`;
+    } finally {
+      fetchOddsBtn.disabled = false;
+      fetchOddsBtn.style.opacity = '1';
+    }
+  });
 })();
 </script>
 

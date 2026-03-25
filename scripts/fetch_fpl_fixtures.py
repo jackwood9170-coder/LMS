@@ -115,17 +115,16 @@ def upsert_team(sb: Client, name: str) -> str:
 def load_existing_fixture_keys(sb: Client) -> set[str]:
     """
     Load a set of dedup keys for all fixtures already in the DB.
-    Key format: "{home_team_id}_{away_team_id}_{YYYY-MM-DD}"
+    Key format: "{home_team_id}_{away_team_id}" — each pair plays once at home per season.
     """
     result = (
         sb.table("fixtures")
-        .select("home_team_id, away_team_id, kickoff")
+        .select("home_team_id, away_team_id")
         .execute()
     )
     keys = set()
     for r in result.data:
-        ko = r["kickoff"][:10] if r["kickoff"] else ""
-        keys.add(f"{r['home_team_id']}_{r['away_team_id']}_{ko}")
+        keys.add(f"{r['home_team_id']}_{r['away_team_id']}")
     return keys
 
 
@@ -185,22 +184,33 @@ def main() -> None:
             skipped_no_kickoff += 1
             continue
 
-        ko_date = kickoff_raw[:10]
-        dedup_key = f"{home_id}_{away_id}_{ko_date}"
+        dedup_key = f"{home_id}_{away_id}"
 
         if dedup_key in existing_keys:
+            # Update kickoff/gameweek in case they changed (rescheduled fixture)
+            sb.table("fixtures").upsert({
+                "home_team_id": home_id,
+                "away_team_id": away_id,
+                "home_team_name": home_name,
+                "away_team_name": away_name,
+                "kickoff": kickoff_raw,
+                "gameweek": gameweek,
+                "status": "scheduled",
+            }, on_conflict="home_team_id,away_team_id").execute()
             skipped_existing += 1
             continue
 
         payload = {
             "home_team_id": home_id,
             "away_team_id": away_id,
+            "home_team_name": home_name,
+            "away_team_name": away_name,
             "kickoff": kickoff_raw,
             "gameweek": gameweek,
             "status": "scheduled",
         }
 
-        sb.table("fixtures").insert(payload).execute()
+        sb.table("fixtures").upsert(payload, on_conflict="home_team_id,away_team_id").execute()
         existing_keys.add(dedup_key)
         inserted += 1
         log.info(

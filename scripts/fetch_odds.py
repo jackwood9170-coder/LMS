@@ -91,6 +91,8 @@ def upsert_fixture(sb: Client, event: dict, home_id: str, away_id: str) -> str:
         "odds_api_event_id": event["id"],
         "home_team_id": home_id,
         "away_team_id": away_id,
+        "home_team_name": event["home_team"],
+        "away_team_name": event["away_team"],
         "kickoff": event["commence_time"],
         "status": "scheduled",
         "has_odds": True,
@@ -98,7 +100,7 @@ def upsert_fixture(sb: Client, event: dict, home_id: str, away_id: str) -> str:
     }
     result = (
         sb.table("fixtures")
-        .upsert(payload, on_conflict="odds_api_event_id")
+        .upsert(payload, on_conflict="home_team_id,away_team_id")
         .execute()
     )
     return result.data[0]["id"]

@@ -20,9 +20,13 @@ Required environment variables (see .env):
 import os
 import sys
 from datetime import datetime, timezone
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from dotenv import load_dotenv
 from supabase import create_client, Client
+
+# Add project root to path so we can import scripts
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from scripts.lms_solver import recommend as lms_recommend
 
 # ---------------------------------------------------------------------------
 # Config
@@ -283,10 +287,216 @@ def index():
     return app.send_static_file("index.html")
 
 
+@app.route("/lms")
+def lms_page():
+    return app.send_static_file("lms.html")
+
+
 @app.route("/api/fixtures")
 def api_fixtures():
     data = build_comparison_data()
     return jsonify(data)
+
+
+# ---------------------------------------------------------------------------
+# LMS API
+# ---------------------------------------------------------------------------
+
+@app.route("/api/lms/teams")
+def api_lms_teams():
+    """Return all teams for the pick UI."""
+    sb = get_supabase()
+    teams = load_teams(sb)
+    out = sorted(
+        [{"id": tid, "name": t["name"], "elo": round(float(t["current_elo"]), 1)} for tid, t in teams.items()],
+        key=lambda x: x["name"],
+    )
+    return jsonify({"teams": out})
+
+
+@app.route("/api/lms/games", methods=["GET"])
+def api_lms_games():
+    """List all LMS games."""
+    sb = get_supabase()
+    games = sb.table("lms_games").select("*").order("created_at", desc=True).execute()
+    # Attach picks to each game
+    for g in games.data:
+        picks = (
+            sb.table("lms_picks")
+            .select("gameweek, team_id, result")
+            .eq("game_id", g["id"])
+            .order("gameweek")
+            .execute()
+        )
+        g["picks"] = picks.data
+        # Attach GW config
+        cfg = (
+            sb.table("lms_gameweek_config")
+            .select("gameweek, included")
+            .eq("game_id", g["id"])
+            .execute()
+        )
+        g["gw_config"] = {r["gameweek"]: r["included"] for r in cfg.data}
+    return jsonify({"games": games.data})
+
+
+@app.route("/api/lms/games", methods=["POST"])
+def api_lms_create_game():
+    """Create a new LMS game."""
+    sb = get_supabase()
+    body = request.get_json(force=True)
+    name = body.get("name", "Game")
+    result = sb.table("lms_games").insert({"name": name}).execute()
+    return jsonify(result.data[0]), 201
+
+
+@app.route("/api/lms/games/<game_id>/picks", methods=["POST"])
+def api_lms_add_pick(game_id: str):
+    """Add a pick to an LMS game."""
+    sb = get_supabase()
+    body = request.get_json(force=True)
+    gameweek = body["gameweek"]
+    team_id = body["team_id"]
+    result_val = body.get("result")  # W/L/D or null
+    payload = {
+        "game_id": game_id,
+        "gameweek": gameweek,
+        "team_id": team_id,
+    }
+    if result_val:
+        payload["result"] = result_val
+    result = sb.table("lms_picks").upsert(payload, on_conflict="game_id,gameweek").execute()
+    return jsonify(result.data[0]), 201
+
+
+@app.route("/api/lms/games/<game_id>/picks/<int:gameweek>", methods=["DELETE"])
+def api_lms_delete_pick(game_id: str, gameweek: int):
+    """Remove a pick from an LMS game."""
+    sb = get_supabase()
+    sb.table("lms_picks").delete().eq("game_id", game_id).eq("gameweek", gameweek).execute()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/lms/games/<game_id>/gw-config", methods=["POST"])
+def api_lms_gw_config(game_id: str):
+    """Set included/excluded gameweeks for an LMS game."""
+    sb = get_supabase()
+    body = request.get_json(force=True)
+    # body: {gameweek: int, included: bool}
+    payload = {
+        "game_id": game_id,
+        "gameweek": body["gameweek"],
+        "included": body["included"],
+    }
+    sb.table("lms_gameweek_config").upsert(
+        payload, on_conflict="game_id,gameweek"
+    ).execute()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/lms/games/<game_id>/recommend")
+def api_lms_recommend(game_id: str):
+    """Run the LMS solver for a given game."""
+    sb = get_supabase()
+
+    # Load model params
+    params = load_model_params(sb)
+    hfa = params.get("hfa")
+    draw_boundary = params.get("draw_boundary")
+    if hfa is None or draw_boundary is None:
+        return jsonify({"error": "Model not calibrated"}), 400
+
+    # Load teams
+    teams = load_teams(sb)
+
+    # Load game picks
+    picks_result = (
+        sb.table("lms_picks")
+        .select("gameweek, team_id, result")
+        .eq("game_id", game_id)
+        .order("gameweek")
+        .execute()
+    )
+    used_team_ids = {p["team_id"] for p in picks_result.data}
+    current_week_in_game = len(picks_result.data) + 1
+
+    # Load GW config
+    cfg_result = (
+        sb.table("lms_gameweek_config")
+        .select("gameweek, included")
+        .eq("game_id", game_id)
+        .execute()
+    )
+    gw_config = {r["gameweek"]: r["included"] for r in cfg_result.data}
+
+    # Load future fixtures
+    now = datetime.now(timezone.utc).isoformat()
+    fixtures = (
+        sb.table("fixtures")
+        .select("id, home_team_id, away_team_id, kickoff, gameweek")
+        .eq("status", "scheduled")
+        .gt("kickoff", now)
+        .order("kickoff")
+        .execute()
+    ).data
+
+    # Determine included GWs — all future GWs unless explicitly excluded
+    all_future_gws = {f["gameweek"] for f in fixtures if f.get("gameweek")}
+    included_gws = {gw for gw in all_future_gws if gw_config.get(gw, True)}
+
+    # Load market odds and build de-vigged win probs per fixture
+    fixture_ids = [f["id"] for f in fixtures if f.get("id")]
+    alias_to_id = build_alias_map({tid: t["name"] for tid, t in teams.items()})
+    odds_map = load_h2h_odds_pinbet(sb, fixture_ids) if fixture_ids else {}
+
+    market_win_probs: dict[str, dict[str, float]] = {}
+    for fid, entry in odds_map.items():
+        outcomes = entry["outcomes"]
+        # Find the fixture to resolve team IDs
+        fx = next((f for f in fixtures if f["id"] == fid), None)
+        if not fx:
+            continue
+        odds_h = find_outcome_price(outcomes, fx["home_team_id"], alias_to_id)
+        odds_d = outcomes.get("Draw")
+        odds_a = find_outcome_price(outcomes, fx["away_team_id"], alias_to_id)
+        if all([odds_h, odds_d, odds_a]):
+            mkt_h, _mkt_d, mkt_a = devig(odds_h, odds_d, odds_a)
+            market_win_probs[fid] = {"home": mkt_h, "away": mkt_a}
+
+    rec = lms_recommend(
+        fixtures=fixtures,
+        teams=teams,
+        hfa=hfa,
+        draw_boundary=draw_boundary,
+        used_team_ids=used_team_ids,
+        current_week_in_game=current_week_in_game,
+        included_gws=included_gws,
+        market_win_probs=market_win_probs,
+    )
+
+    # Enrich used_teams for the response
+    used_teams = []
+    for p in picks_result.data:
+        t = teams.get(p["team_id"])
+        used_teams.append({
+            "gameweek": p["gameweek"],
+            "team_name": t["name"] if t else "Unknown",
+            "team_id": p["team_id"],
+            "result": p.get("result"),
+        })
+
+    return jsonify({
+        "game_id": game_id,
+        "current_gw": rec.current_gw,
+        "horizon": rec.horizon,
+        "expected_duration": rec.expected_duration,
+        "survival_prob": rec.survival_prob,
+        "picks_plan": rec.picks,
+        "all_options": rec.all_options,
+        "used_teams": used_teams,
+        "included_gws": sorted(included_gws),
+        "excluded_gws": sorted(all_future_gws - included_gws),
+    })
 
 
 if __name__ == "__main__":

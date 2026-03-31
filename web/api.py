@@ -332,6 +332,39 @@ def api_fetch_upcoming_odds():
     }), (200 if ok else 500)
 
 
+@app.route("/api/run-full-pipeline", methods=["POST"])
+def api_run_full_pipeline():
+    """Run scripts/run_pipeline.py and return execution status/output."""
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    script_path = os.path.join(repo_root, "scripts", "run_pipeline.py")
+
+    if not os.path.exists(script_path):
+        return jsonify({
+            "ok": False,
+            "message": "run_pipeline.py not found",
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+        }), 404
+
+    completed = subprocess.run(
+        [sys.executable, script_path],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    ok = completed.returncode == 0
+    return jsonify({
+        "ok": ok,
+        "message": "Full pipeline completed" if ok else "Full pipeline failed",
+        "exit_code": completed.returncode,
+        "stdout": completed.stdout.strip(),
+        "stderr": completed.stderr.strip(),
+    }), (200 if ok else 500)
+
+
 # ---------------------------------------------------------------------------
 # LMS API
 # ---------------------------------------------------------------------------

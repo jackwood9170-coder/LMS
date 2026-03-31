@@ -198,6 +198,7 @@
   <h1><span>LMS</span> &mdash; Elo vs Market</h1>
   <div style="display:flex;gap:16px;align-items:center">
     <button id="fetchOddsBtn" style="font-size:12px;background:#3b82f6;color:#fff;border:none;border-radius:6px;padding:8px 10px;cursor:pointer">Fetch Upcoming Odds</button>
+    <button id="runPipelineBtn" style="font-size:12px;background:#16a34a;color:#fff;border:none;border-radius:6px;padding:8px 10px;cursor:pointer">Run Full Pipeline</button>
     <div id="fetchStatus" class="meta" style="max-width:260px"></div>
     <a href="/lms" style="font-size:12px;color:#3b82f6;text-decoration:none">Last Man Standing →</a>
     <div class="meta" id="headerMeta"></div>
@@ -216,6 +217,7 @@
   const app = document.getElementById('app');
   const meta = document.getElementById('headerMeta');
   const fetchOddsBtn = document.getElementById('fetchOddsBtn');
+  const runPipelineBtn = document.getElementById('runPipelineBtn');
   const fetchStatus = document.getElementById('fetchStatus');
 
   async function loadFixtures() {
@@ -333,6 +335,36 @@
       fetchStatus.textContent = `Request failed: ${err.message}`;
     } finally {
       fetchOddsBtn.disabled = false;
+      fetchOddsBtn.style.opacity = '1';
+    }
+  });
+
+  runPipelineBtn.addEventListener('click', async () => {
+    runPipelineBtn.disabled = true;
+    fetchOddsBtn.disabled = true;
+    runPipelineBtn.style.opacity = '0.7';
+    fetchOddsBtn.style.opacity = '0.7';
+    fetchStatus.textContent = 'Running full pipeline... this may take a few minutes.';
+
+    try {
+      const res = await fetch('/api/run-full-pipeline', { method: 'POST' });
+      const data = await res.json();
+
+      if (!data.ok) {
+        const reason = data.stderr || data.message || `Exit code ${data.exit_code}`;
+        fetchStatus.textContent = `Pipeline failed: ${reason}`;
+        return;
+      }
+
+      fetchStatus.textContent = 'Pipeline complete. Refreshing fixture view...';
+      await loadFixtures();
+      fetchStatus.textContent = 'Pipeline completed and fixture view refreshed.';
+    } catch (err) {
+      fetchStatus.textContent = `Pipeline request failed: ${err.message}`;
+    } finally {
+      runPipelineBtn.disabled = false;
+      fetchOddsBtn.disabled = false;
+      runPipelineBtn.style.opacity = '1';
       fetchOddsBtn.style.opacity = '1';
     }
   });
